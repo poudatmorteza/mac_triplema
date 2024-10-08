@@ -5,7 +5,7 @@ import csv
 from datetime import datetime, timedelta
 import json
 
-"https://demo-api-capital.backend-capital.com/"
+
 # Broker API class to handle communication with Capital.com
 class BrokerAPI:
     BASE_URL = "https://demo-api-capital.backend-capital.com/api/v1"
@@ -18,6 +18,44 @@ class BrokerAPI:
         self.x_security_token = None
         self.open_positions = {}
         self.session = self.start_session()
+
+    def instrument_list(self):
+        """
+        Fetch the list of available instruments.
+        """
+        conn = http.client.HTTPSConnection("demo-api-capital.backend-capital.com")
+        
+        # Construct the URL to get instruments
+        url = "/api/v1/markets"  # Adjust the endpoint as needed
+        headers = {
+            'X-SECURITY-TOKEN': self.x_security_token,
+            'CST': self.cst
+        }
+
+        # Make the API request to get the list of instruments
+        conn.request("GET", url, body="", headers=headers)
+        response = conn.getresponse()
+        data = response.read().decode("utf-8")
+        conn.close()
+
+        if response.status == 200:
+            instruments_data = json.loads(data)
+            
+            # Print out the available instruments
+            for market in instruments_data.get("markets", []):
+                print(f"Instrument: {market['instrumentName']} (Epic: {market['epic']})")
+                
+            return instruments_data
+        else:
+            print(f"Error fetching instruments: {response.status_code} - {data}")
+            return None
+    
+    def get_instrument_type(self, symbol):
+        instrument_data = self.instrument_list()
+        for epic in instrument_data:
+            if symbol == epic["symbo"]:
+                return epic["instrumentType"]
+        
 
     # Start a session (log in)
     def start_session(self):
@@ -236,6 +274,77 @@ class BrokerAPI:
             print(f"Error fetching positions: {response.status} - {data}")
             return None
 
+    def get_contract_size(self, symbol):
+        """
+        Fetch the contract size (lot size) for the given symbol from the broker's API.
+        """
+        url = f"{self.BASE_URL}/markets?searchTerm={symbol}&epics={symbol}"
+        response = self.session.get(url)
+        
+        if response.status_code == 200:
+            market_data = response.json()
+            markets = market_data.get("markets", [])
+            if markets:
+                # Extract the contract size (lot size) for the first matching market
+                contract_size = markets[0].get("lotSize", None)
+                return contract_size
+            else:
+                print(f"No market data found for {symbol}.")
+                return None
+        else:
+            print(f"Error fetching contract size: {response.status_code}, {response.text}")
+            return None
+
+    def get_leverage_by_symbol(self, symbol):
+        """
+        Fetch the leverage for the symbol based on its instrument type, using account preferences.
+        
+        :param symbol: The trading symbol (e.g., 'SILVER', 'EURUSD')
+        :return: The leverage for the symbol's instrument type.
+        """
+        # Step 1: Fetch market details for the symbol to get the instrument type
+        conn = http.client.HTTPSConnection("api-capital.backend-capital.com")
+        payload = ''
+        headers = {
+            'X-SECURITY-TOKEN': self.x_security_token,
+            'CST': self.cst
+        }
+
+        # Fetch market details (epic is the symbol, like 'SILVER')
+        url = f"/api/v1/markets?searchTerm={symbol}&epics={symbol}"
+        conn.request("GET", url, payload, headers)
+        res = conn.getresponse()
+        data = res.read().decode("utf-8")
+        market_data = json.loads(data)
+
+        # Extract the instrument type from the response
+        markets = market_data.get('markets', [])
+        if not markets:
+            print(f"No market data found for {symbol}.")
+            return None
+
+        instrument_type = markets[0].get('instrumentType', None)
+        if not instrument_type:
+            print(f"Instrument type not found for {symbol}.")
+            return None
+
+        # Step 2: Fetch account preferences to get leverage for the instrument type
+        conn.request("GET", "/api/v1/accounts/preferences", payload, headers)
+        res = conn.getresponse()
+        data = res.read().decode("utf-8")
+        preferences = json.loads(data)
+
+        # Extract leverage for the instrument type
+        leverages = preferences.get('leverages', {})
+        asset_leverage = leverages.get(instrument_type, {}).get('current', None)
+
+        if asset_leverage:
+            print(f"Leverage for {symbol} ({instrument_type}): {asset_leverage}")
+            return asset_leverage
+        else:
+            print(f"Leverage for instrument type {instrument_type} not found.")
+            return None
+        
     def calculate_trade_size(self, symbol):
         """
         Calculate the trade size based on 1% of the account balance.
@@ -247,7 +356,8 @@ class BrokerAPI:
             return None
 
         # Step 2: Calculate 1% of the balance
-        trade_value = balance["balance"] * 0.01
+        leverage = self.get_leverage_by_symbol(symbol) 
+        trade_value = balance["balance"] * 0.04 * leverage
 
         # Step 3: Fetch the current price of the asset (epic)
         live_price = self.get_live_price(symbol)
@@ -258,8 +368,14 @@ class BrokerAPI:
         # Assume bid price as the current price
         current_price = live_price['prices'][0]['closePrice']['bid']
         
+        # Step 4: Fetch the contract size from the API
+        contract_size = self.get_contract_size(symbol)
+        if contract_size is None:
+            print(f"Could not fetch contract size for {symbol}.")
+            return None
+        
         # Step 4: Calculate the size of the trade (trade_value / current_price)
-        trade_size = trade_value / current_price
+        trade_size = trade_value / (contract_size * current_price)
         return trade_size
 
     def send_order(self, symbol="EURUSD", side="BUY", size=1.0):
@@ -272,18 +388,19 @@ class BrokerAPI:
             if current_position["direction"] != side:
                 print(f"Opposite position exists for {symbol}. Closing current {current_position['direction']} position.")
                 self.close_position(symbol)  # Close the current opposite position
-            return
-            # Calculate the trade size based on 1% of the account balance
-
-        trade_size = self.calculate_trade_size(symbol)
-        if trade_size is None:
+            else:
+                return
+        
+        # Calculate the trade size based on 1% of the account balance
+        size = self.calculate_trade_size(symbol)
+        if size is None:
             print(f"Unable to calculate trade size for {symbol}.")
             return
         min_size = self.get_minimum_size(symbol)
         if min_size is not None and size < min_size:
-            print(f"Order size for {symbol} is below the minimum allowed ({min_size}). Adjusting size to minimum.")
+            print(f"Order size for {symbol}:{size} is below the minimum allowed ({min_size}). Adjusting size to minimum.")
             size = min_size  # Adjust size to the minimum allowed
-
+        
         conn = http.client.HTTPSConnection("demo-api-capital.backend-capital.com")
 
         # Construct the URL
@@ -308,6 +425,7 @@ class BrokerAPI:
             "timeInForce": "FILL_OR_KILL"
         }
 
+        
         # Convert the payload to a JSON string
         body = json.dumps(payload)
 
@@ -328,17 +446,21 @@ class BrokerAPI:
         conn.close()
 
     def close_position(self, symbol="EURUSD"):
+        # Check if there is an open position for the symbol
         if symbol not in self.open_positions:
             print(f"No open position for {symbol} to close.")
             return
 
-        # Fetch the position ID
-        position_id = self.open_positions[symbol]["position_id"]
+        # Fetch the position ID (deal ID)
+        position_id = self.open_positions[symbol].get("position_id")
+        if not position_id:
+            print(f"Error: No position ID found for {symbol}.")
+            return
 
         conn = http.client.HTTPSConnection("demo-api-capital.backend-capital.com")
 
         # Construct the URL to close the position
-        url = f"/api/v1/positions/otc/{position_id}/close"
+        url = f"/api/v1/positions/{position_id}"
 
         # Prepare the headers
         headers = {
@@ -355,21 +477,27 @@ class BrokerAPI:
         # Convert the payload to JSON
         body = json.dumps(payload)
 
-        # Send the POST request
-        conn.request("POST", url, body=body, headers=headers)
+        try:
+            # Send the POST request to close the position
+            conn.request("DELETE", url, body=body, headers=headers)
 
-        # Get the response
-        response = conn.getresponse()
-        data = response.read().decode("utf-8")
+            # Get the response
+            response = conn.getresponse()
+            data = response.read().decode("utf-8")
 
-        if response.status == 200:
-            print(f"Position for {symbol} closed successfully.")
-            del self.open_positions[symbol]  # Remove the closed position from open_positions
-        else:
-            print(f"Error closing position: {response.status} - {data}")
-
-        conn.close()
-
+            if response.status == 200:
+                print(f"Position for {symbol} closed successfully.")
+                # Remove the closed position from open_positions
+                del self.open_positions[symbol]
+            else:
+                print(f"Error closing position for {symbol}: {response.status} - {data}")
+        
+        except Exception as e:
+            print(f"Exception occurred while closing the position: {e}")
+        
+        finally:
+            conn.close()
+            
     # Fetch live price quotes
     def get_live_price(self, symbol="EURUSD"):
         url = f"{self.BASE_URL}/prices/{symbol}/"
@@ -380,6 +508,54 @@ class BrokerAPI:
             print(f"Error fetching live price: {response.status_code} - {response.text}")
             return None
 
+    def calculate_stop_distance(self, symbol):
+        """
+        Calculate the stop distance based on 0.1% of the account balance.
+        :param symbol: The trading symbol (e.g., 'EURUSD', 'GOLD')
+        :return: Calculated stop distance in pips/points
+        """
+        # Step 1: Fetch the account balance
+        balance = self.get_account_balance()
+        if balance is None:
+            print("Could not retrieve account balance.")
+            return None
+
+        # Step 2: Calculate 0.1% of the balance
+        stop_value = balance["balance"] * 0.001  # 0.1% of the account balance
+
+        # Fetch market data for the asset
+        market_data = self.get_market_data(symbol)
+        if market_data is None:
+            print(f"Error fetching market data for {symbol}.")
+            return None
+
+        # Step 3: Extract necessary values from the market data
+        current_price = market_data["snapshot"]["bid"]  # Bid price of the asset
+        pip_position = market_data["snapshot"]["decimalPlacesFactor"]  # Decimal position for pips
+        tick_size = market_data["dealingRules"]["minSizeIncrement"]["value"]  # Minimum tick size (smallest movement)
+
+        # Step 4: Calculate the price movement that equals 0.1% of the account balance
+        stop_distance_in_price = stop_value / current_price
+
+        # Convert stop distance to pips/points
+        stop_distance_in_pips = stop_distance_in_price / tick_size
+
+        # Adjust based on pip position
+        stop_distance_adjusted = round(stop_distance_in_pips, pip_position)
+
+        print(f"Calculated stop distance for {symbol}: {stop_distance_adjusted}")
+        return stop_distance_adjusted
+
+    def get_market_data(self, symbol):
+        url = f"{self.BASE_URL}/markets/{symbol}"
+        response = self.session.get(url)
+        if response.status_code == 200:
+            market_data = response.json()
+            return market_data  # Assuming you're working with the first result
+        else:
+            print(f"Error fetching market data: {response.status_code} - {response.text}")
+            return None
+        
     def get_minimum_size(self, epic):
         """
         Fetch minimum order size for the given symbol (epic).
@@ -483,7 +659,7 @@ class BrokerAPI:
                 self.close_position(symbol)
                 return True
             else:
-                print(f"Take-profit not reached for {symbol}. Current profit: {unrealized_profit}")
+                print(f"Take-profit not reached for {symbol}:{take_profit_target}$. Current profit: {unrealized_profit}")
                 return False
         else:
             print(f"Error checking take-profit: {response.status_code} - {data}")
@@ -494,7 +670,7 @@ class BrokerAPI:
         """
         Calculate 1% of the account balance for the take-profit target.
         """
-        return balance["balance"] * 0.01
+        return balance["balance"] * 0.001
 # Main function
 if __name__ == "__main__":
     broker = BrokerAPI(api_key="your_api_key", login="your_login", password="your_password")
