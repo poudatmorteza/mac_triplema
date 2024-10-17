@@ -1,6 +1,6 @@
 import time
 from threading import Thread
-from broker import BrokerAPI
+from broker_live import BrokerAPILIVE
 from strategy import TripleMAMACDStrategy
 import time
 import configparser
@@ -60,7 +60,6 @@ def get_seconds_until_next_quarter_plus_5_seconds():
 # Main function for strategy logic
 def strategy_logic():
     while True:
-        broker.start_session()
         for symbol in symbols:
             # Fetch the latest candle for each symbol every 15 minutes
             print(f"Fetching latest candle for {symbol}...")
@@ -124,7 +123,6 @@ def position_management():
         broker.update_positions()
         open_positions = broker.open_positions
 
-
         positions_to_remove = [existing_position for existing_position in positions if existing_position not in open_positions]
         
         for existing_position in positions_to_remove:
@@ -132,7 +130,6 @@ def position_management():
             del positions[existing_position]
 
         for symbol, position in open_positions.items():
-            
             # Get the position details from the broker
             position_id = position["position_id"]
             current_profit = position["upl"]  # Fetch current UPL
@@ -162,10 +159,16 @@ def initialize_strategies():
 
 if __name__ == "__main__":
     # Define symbols to monitor
-    symbols = [
-        "BTCUSD", 
-        "ETHUSD","AUDUSD","GBPJPY","USDCAD","USDCHF", "EURUSD", "GBPUSD", 
-        "GOLD", "US100", "US30", "US500", "OIL_CRUDE","NATURALGAS","SILVER","COPPER"]
+    symbols = ["BTCUSD", 
+               "ETHUSD", 
+               "EURUSD", 
+               "GBPUSD", 
+               "GOLD", 
+               "US100", 
+               "US30", 
+               "US500", 
+               "OIL_CRUDE"
+               ]
     strategies_tiple_ema = {}
 
     # Initialize the broker API
@@ -174,7 +177,7 @@ if __name__ == "__main__":
     api_key = config['broker']['api_key']
     password = config['broker']['password']
     account_id = config['broker']['account_id']
-    broker = BrokerAPI(api_key=api_key, login=account_id, password=password,acc_id="243609514238366878")
+    broker = BrokerAPILIVE(api_key=api_key, login=account_id, password=password,acc_id="243609514238366878")
 
     # Initialize strategies
     initialize_strategies()
