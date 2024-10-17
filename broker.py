@@ -10,7 +10,7 @@ import json
 class BrokerAPI:
     BASE_URL = "https://demo-api-capital.backend-capital.com/api/v1"
     
-    def __init__(self, api_key, login, password):
+    def __init__(self, api_key, login, password, acc_id=None):
         self.api_key = api_key
         self.login = login
         self.password = password
@@ -47,7 +47,7 @@ class BrokerAPI:
                 
             return instruments_data
         else:
-            print(f"Error fetching instruments: {response.status_code} - {data}")
+            print(f"Error fetching instruments: {response.status} - {data}")
             return None
     
     def get_instrument_type(self, symbol):
@@ -198,31 +198,8 @@ class BrokerAPI:
                 print("No candle data found.")
                 return None
         else:
-            print(f"Error fetching latest candle: {response.status_code} - {data}")
+            print(f"Error fetching latest candle: {response.code} - {data}")
             return None
-
-    # Save the fetched data to a CSV file
-    def save_data_to_csv(self, data, epic):
-        filename = f'{epic}.csv'
-        prices = data.get('prices', [])
-        
-        with open(filename, mode='a', newline='') as file:
-            writer = csv.writer(file)
-            if file.tell() == 0:
-                writer.writerow(["snapshotTime", "openPrice_bid", "openPrice_ask", "closePrice_bid", "closePrice_ask", "highPrice_bid", "highPrice_ask", "lowPrice_bid", "lowPrice_ask", "lastTradedVolume"])
-            for price in prices:
-                writer.writerow([
-                    price.get('snapshotTime'),
-                    price['openPrice']['bid'],
-                    price['openPrice']['ask'],
-                    price['closePrice']['bid'],
-                    price['closePrice']['ask'],
-                    price['highPrice']['bid'],
-                    price['highPrice']['ask'],
-                    price['lowPrice']['bid'],
-                    price['lowPrice']['ask'],
-                    price.get('lastTradedVolume')
-                ])
 
     def update_positions(self):
         """
@@ -263,12 +240,14 @@ class BrokerAPI:
                 position_id = pos['position']['dealId']
                 direction = pos['position']['direction']
                 size = pos['position']['size']
+                upl = pos['position']['upl']
 
                 # Save the position details (ID, direction, and size)
                 self.open_positions[symbol] = {
                     "position_id": position_id,
                     "direction": direction,
-                    "size": size
+                    "size": size,
+                    "upl": upl
                 }
         else:
             print(f"Error fetching positions: {response.status} - {data}")
@@ -289,8 +268,13 @@ class BrokerAPI:
                 contract_size = markets[0].get("lotSize", None)
                 return contract_size
             else:
-                print(f"No market data found for {symbol}.")
-                return None
+                market_data = self.get_market_data(symbol)
+                if market_data:
+                    contract_size = market_data["instrument"].get("lotSize", None)
+                    return contract_size
+                else:
+                    print(f"No market data found for {symbol}.")
+                    return None
         else:
             print(f"Error fetching contract size: {response.status_code}, {response.text}")
             return None
@@ -303,7 +287,7 @@ class BrokerAPI:
         :return: The leverage for the symbol's instrument type.
         """
         # Step 1: Fetch market details for the symbol to get the instrument type
-        conn = http.client.HTTPSConnection("api-capital.backend-capital.com")
+        conn = http.client.HTTPSConnection("demo-api-capital.backend-capital.com")
         payload = ''
         headers = {
             'X-SECURITY-TOKEN': self.x_security_token,
@@ -321,9 +305,13 @@ class BrokerAPI:
         markets = market_data.get('markets', [])
         if not markets:
             print(f"No market data found for {symbol}.")
-            return None
-
-        instrument_type = markets[0].get('instrumentType', None)
+            market_data = self.get_market_data(symbol)
+            if market_data:
+                instrument_type = market_data["instrument"].get("type", None)
+            else:
+                return None
+        else:
+            instrument_type = markets[0].get('instrumentType', None)
         if not instrument_type:
             print(f"Instrument type not found for {symbol}.")
             return None
@@ -339,6 +327,9 @@ class BrokerAPI:
         asset_leverage = leverages.get(instrument_type, {}).get('current', None)
 
         if asset_leverage:
+            if instrument_type == "COMMODITIES":
+                if symbol != "GOLD":
+                    asset_leverage = 10
             print(f"Leverage for {symbol} ({instrument_type}): {asset_leverage}")
             return asset_leverage
         else:
@@ -378,7 +369,7 @@ class BrokerAPI:
         trade_size = trade_value / (contract_size * current_price)
         return trade_size
 
-    def send_order(self, symbol="EURUSD", side="BUY", size=1.0):
+    def send_order(self, symbol="EURUSD", side="BUY", size=1.0, tp=None, sl=None):
 
         self.update_positions()
         # Check if there's already an open position for this symbol
@@ -578,7 +569,7 @@ class BrokerAPI:
             min_size = market_data["dealingRules"]['minDealSize']['value']  # Fetch the minimum deal size if available
             return min_size
         else:
-            print(f"Error fetching minimum size: {response.status_code} - {data}")
+            print(f"Error fetching minimum size: {response.status} - {data}")
             return None
     
     def get_account_balance(self):
@@ -610,7 +601,7 @@ class BrokerAPI:
             balance = account_data['accounts'][0]['balance']  # Assuming there's one account
             return balance
         else:
-            print(f"Error fetching account balance: {response.status_code} - {data}")
+            print(f"Error fetching account balance: {response.status} - {data}")
             return None
     
 
@@ -662,7 +653,7 @@ class BrokerAPI:
                 print(f"Take-profit not reached for {symbol}:{take_profit_target}$. Current profit: {unrealized_profit}")
                 return False
         else:
-            print(f"Error checking take-profit: {response.status_code} - {data}")
+            print(f"Error checking take-profit: {response.status} - {data}")
             return False
     
 
@@ -670,7 +661,90 @@ class BrokerAPI:
         """
         Calculate 1% of the account balance for the take-profit target.
         """
-        return balance["balance"] * 0.001
+        return balance["balance"] * 0.005
+    
+    def monitor_dynamic_take_profit(self, symbol):
+        """
+        Monitor open positions dynamically based on profit milestones:
+        - Start monitoring once the profit reaches 1x.
+        - Close the position only if profit drops below the dynamic stop level.
+        """
+        if symbol not in self.open_positions:
+            print(f"No open position for {symbol} to check TP.")
+            return False
+
+        # Get the current account balance
+        balance = self.get_account_balance()
+        if balance is None:
+            print("Could not retrieve account balance.")
+            return False
+
+        # Calculate the base target (1% of the balance)
+        base_tp_target = balance["balance"] * 0.001
+        base_sl_target = balance["balance"] * 0.01
+        # Fetch open positions and their unrealized profit
+        conn = http.client.HTTPSConnection("demo-api-capital.backend-capital.com")
+        url = f"/api/v1/positions"
+        headers = {
+            "X-SECURITY-TOKEN": self.x_security_token,
+            "CST": self.cst,
+            "Content-Type": "application/json"
+        }
+
+        conn.request("GET", url, body='', headers=headers)
+        response = conn.getresponse()
+        data = response.read().decode("utf-8")
+        conn.close()
+
+        if response.status == 200:
+            positions_data = json.loads(data)
+
+            for pos in positions_data.get('positions', []):
+                if pos['market']['epic'] == symbol:
+                    # Get the current unrealized profit
+                    unrealized_profit = pos['position']['upl']
+
+                    # Check if we are tracking this position's stop level
+                    if 'dynamic_stop_level' not in self.open_positions[symbol]:
+                        # Only track dynamic stop levels once profit exceeds 1x
+                        if unrealized_profit >= base_tp_target:
+                            # Initialize the stop level to breakeven (0)
+                            self.open_positions[symbol]['dynamic_stop_level'] = 0
+                            print(f"Profit for {symbol} has reached 1x({base_tp_target}$). Starting to track dynamic stop.")
+                        else:
+                            # Do not close position; profit hasn't reached the first target yet
+                            print(f"Profit for {symbol} is below 1x({base_tp_target}$), no action taken.")
+                            if unrealized_profit< -1 * base_sl_target:
+                                print(f"STOP LOSS Reached. Cloing Position for symbol: {symbol}")
+                                self.close_position(symbol)
+
+
+                    # If we are already tracking, continue dynamic take profit management
+                    try:
+                        current_stop_level = self.open_positions[symbol]['dynamic_stop_level']
+                        milestone_reached = int(unrealized_profit // base_tp_target)
+                        print(f'{symbol} Profit: {unrealized_profit}, Stop Level: {current_stop_level}:{current_stop_level*base_tp_target}')
+                        if milestone_reached > current_stop_level:
+                            # Update the stop level to one milestone below the current milestone
+                            self.open_positions[symbol]['dynamic_stop_level'] = milestone_reached - 1
+                            print(f"Profit for {symbol} reached {milestone_reached}x. Stop level set to {milestone_reached - 1}x({base_tp_target}$):{current_stop_level}.")
+                        # Close the position if the profit drops below the dynamic stop level
+                        stop_level_profit = self.open_positions[symbol]['dynamic_stop_level'] * base_tp_target
+                        if unrealized_profit < stop_level_profit:
+                            print(f"Profit for {symbol} dropped below the stop level ({stop_level_profit}). Closing position.")
+                            self.close_position(symbol)
+                    except Exception as e:
+                        print(f"Error in fetching data positin {symbol}:{e}")  
+
+                    
+
+
+            print(f"Profit for {symbol} is still running.")
+
+        else:
+            print(f"Error checking take-profit: {response.status} - {data}")
+    
+        
 # Main function
 if __name__ == "__main__":
     broker = BrokerAPI(api_key="your_api_key", login="your_login", password="your_password")
