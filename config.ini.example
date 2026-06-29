@@ -1,0 +1,4 @@
+[broker]
+api_key = your_capital_com_api_key
+password = your_account_password
+account_id = your@email.com

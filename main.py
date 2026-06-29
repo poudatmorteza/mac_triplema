@@ -169,8 +169,15 @@ if __name__ == "__main__":
     strategies_tiple_ema = {}
 
     # Initialize the broker API
+    from pathlib import Path
+
     config = configparser.ConfigParser()
-    config.read('/home/botuser/macd_ema/mac_triplema/config.ini')
+    config_path = Path(__file__).resolve().parent / "config.ini"
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Missing {config_path.name}. Copy config.ini.example and add your broker credentials."
+        )
+    config.read(config_path)
     api_key = config['broker']['api_key']
     password = config['broker']['password']
     account_id = config['broker']['account_id']
